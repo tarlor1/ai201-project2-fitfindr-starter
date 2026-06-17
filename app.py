@@ -20,7 +20,7 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
@@ -29,22 +29,74 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
 
     Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
-
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
+        A tuple of four strings:
+            (listing_text, outfit_suggestion, fit_card, tool_log)
+        Each string maps to one of the four output panels in the UI.
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    log = []
+
+    def skip(name: str) -> None:
+        log.append(f"  {name:<20} skipped")
+
+    # Step 1: guard empty query
+    if not user_query or not user_query.strip():
+        return "Please enter a search query.", "", "", ""
+
+    # Step 2: select wardrobe
+    wardrobe = (
+        get_example_wardrobe()
+        if wardrobe_choice == "Example wardrobe"
+        else get_empty_wardrobe()
+    )
+
+    # Step 3: run agent
+    session = run_agent(query=user_query, wardrobe=wardrobe)
+
+    # Build log from what the session contains
+    parsed = session.get("parsed") or {}
+    log.append(
+        f"[OK] parse_query        -> description={parsed.get('description')!r}, "
+        f"size={parsed.get('size')!r}, max_price={parsed.get('max_price')!r}"
+    )
+
+    results = session.get("search_results") or []
+    if results:
+        log.append(
+            f"[OK] search_listings    -> {len(results)} result(s), "
+            f"selected \"{session['selected_item']['title']}\""
+        )
+    else:
+        log.append(f"[--] search_listings    -> 0 results — stopping here")
+        skip("suggest_outfit")
+        skip("create_fit_card")
+        return session["error"], "", "", "\n".join(log)
+
+    if session.get("outfit_suggestion"):
+        wardrobe_label = "empty wardrobe" if not wardrobe["items"] else "wardrobe items"
+        log.append(f"[OK] suggest_outfit     -> outfit generated (used {wardrobe_label})")
+    else:
+        log.append(f"[--] suggest_outfit     -> returned empty — stopping here")
+        skip("create_fit_card")
+        return session["error"], "", "", "\n".join(log)
+
+    if session.get("fit_card"):
+        log.append(f"[OK] create_fit_card    -> caption ready")
+    else:
+        log.append(f"[--] create_fit_card    -> no output")
+
+    # Step 5: format listing
+    item = session["selected_item"]
+    listing_text = (
+        f"{item['title']}\n\n"
+        f"Price:      ${item['price']:.2f}\n"
+        f"Size:       {item['size']}\n"
+        f"Condition:  {item['condition']}\n"
+        f"Platform:   {item['platform']}\n"
+        f"Tags:       {', '.join(item['style_tags'])}\n\n"
+        f"{item['description']}"
+    )
+
+    return listing_text, session["outfit_suggestion"], session["fit_card"], "\n".join(log)
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -98,21 +150,29 @@ Describe what you're looking for — include size and price if you want to filte
                 interactive=False,
             )
 
+        tool_log_output = gr.Textbox(
+            label="🔧 Tools run",
+            lines=4,
+            interactive=False,
+        )
+
         gr.Examples(
             examples=[[q, "Example wardrobe"] for q in EXAMPLE_QUERIES],
             inputs=[query_input, wardrobe_choice],
             label="Try these queries",
         )
 
+        outputs = [listing_output, outfit_output, fitcard_output, tool_log_output]
+
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=outputs,
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=outputs,
         )
 
     return demo

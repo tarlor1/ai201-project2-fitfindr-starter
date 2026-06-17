@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -69,8 +70,33 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    if max_price is not None:
+        listings = [l for l in listings if l["price"] <= max_price]
+
+    if size is not None:
+        size_lower = size.lower()
+        listings = [l for l in listings if size_lower in l["size"].lower()]
+
+    keywords = [w.lower() for w in re.findall(r"\w+", description) if len(w) > 1]
+
+    scored = []
+    for listing in listings:
+        searchable = " ".join([
+            listing["title"],
+            listing["description"],
+            listing["category"],
+            " ".join(listing["style_tags"]),
+            listing.get("brand") or "",
+        ]).lower()
+        words = set(re.findall(r"\w+", searchable))
+        score = sum(1 for kw in keywords if kw in words)
+        if score > 0:
+            scored.append((score, listing))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [listing for _, listing in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +126,40 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    client = _get_groq_client()
+
+    item_desc = (
+        f"{new_item['title']} (${new_item['price']:.2f}, size {new_item['size']}, "
+        f"{new_item['condition']} condition)"
+    )
+
+    if not wardrobe["items"]:
+        prompt = (
+            f"A thrifter is considering buying: {item_desc}\n\n"
+            "They don't have a wardrobe on file yet. Give them 1-2 general outfit ideas — "
+            "what types of pieces pair well with this item, what vibe or aesthetic it suits, "
+            "and how to style it. Be specific and practical."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {item['name']} ({', '.join(item['style_tags'])})"
+            + (f" — {item['notes']}" if item.get("notes") else "")
+            for item in wardrobe["items"]
+        )
+        prompt = (
+            f"A thrifter is considering buying: {item_desc}\n\n"
+            f"Here is their current wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits using the new item combined with specific pieces "
+            "from their wardrobe. Name each wardrobe piece you'd pair it with and describe "
+            "the overall vibe of the outfit."
+        )
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+    )
+    return response.choices[0].message.content
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +191,25 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "Error: outfit data is missing — cannot generate a fit card."
+
+    client = _get_groq_client()
+
+    prompt = (
+        f"Write a 2-4 sentence Instagram/TikTok OOTD caption for this thrifted outfit.\n\n"
+        f"Thrifted item: {new_item['title']} — ${new_item['price']:.2f} on {new_item['platform']}\n"
+        f"Outfit: {outfit}\n\n"
+        "Rules:\n"
+        "- Sound casual and authentic, like a real person posting their outfit of the day\n"
+        "- Mention the item name, price, and platform naturally (once each)\n"
+        "- Describe the outfit vibe in specific, vivid terms\n"
+        "- No hashtags, no emojis"
+    )
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=1.1,
+    )
+    return response.choices[0].message.content

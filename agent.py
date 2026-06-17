@@ -18,7 +18,51 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import json
+import os
+
+from dotenv import load_dotenv
+from groq import Groq
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+load_dotenv()
+
+
+# ── query parser ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Ask the LLM to extract description, size, and max_price from the raw query.
+    Returns a dict with those three keys. Raises ValueError on malformed JSON.
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not set. Add it to a .env file.")
+    client = Groq(api_key=api_key)
+
+    prompt = (
+        "Extract the following fields from this shopping query. "
+        "Return valid JSON only, no explanation, no markdown.\n"
+        "Fields:\n"
+        "  description (str — the item being searched for)\n"
+        "  size (str or null — clothing size if mentioned, e.g. 'M', 'S/M', 'XL')\n"
+        "  max_price (float or null — maximum price if mentioned)\n\n"
+        f"Query: {query}"
+    )
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    raw = response.choices[0].message.content.strip()
+
+    # Strip markdown code fences the LLM sometimes adds
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+
+    return json.loads(raw)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +136,51 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse query with LLM
+    try:
+        session["parsed"] = _parse_query(query)
+    except (json.JSONDecodeError, Exception):
+        session["error"] = "Could not parse your query. Please try rephrasing."
+        return session
+
+    parsed = session["parsed"]
+
+    # Step 3: search listings — early return if nothing found
+    session["search_results"] = search_listings(
+        description=parsed.get("description", query),
+        size=parsed.get("size"),
+        max_price=parsed.get("max_price"),
+    )
+
+    if not session["search_results"]:
+        desc = parsed.get("description", query)
+        session["error"] = (
+            f"No listings found for '{desc}'. "
+            "Try broader keywords, a higher price limit, or remove the size filter."
+        )
+        return session
+
+    # Step 4: pick top result
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: suggest outfit — guard empty response
+    session["outfit_suggestion"] = suggest_outfit(
+        new_item=session["selected_item"],
+        wardrobe=session["wardrobe"],
+    )
+
+    if not session["outfit_suggestion"] or not session["outfit_suggestion"].strip():
+        session["error"] = "Could not generate outfit suggestions."
+        return session
+
+    # Step 6: create fit card
+    session["fit_card"] = create_fit_card(
+        outfit=session["outfit_suggestion"],
+        new_item=session["selected_item"],
+    )
+
     return session
 
 
